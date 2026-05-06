@@ -191,10 +191,7 @@ impl RemoteTransport for SshTransport {
         })
     }
 
-    fn install_binary(
-        &self,
-        platform: Option<RemotePlatform>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> {
+    fn install_binary(&self) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> {
         let socket_path = self.socket_path.clone();
         Box::pin(async move {
             let script = remote_server::setup::install_script(None);
@@ -215,12 +212,7 @@ impl RemoteTransport for SshTransport {
                         == Some(remote_server::setup::NO_HTTP_CLIENT_EXIT_CODE) =>
                 {
                     log::info!("Remote server has no curl/wget, falling back to SCP upload");
-                    let Some(platform) = platform else {
-                        return Err(
-                            "SCP fallback requires platform detection to have succeeded".into()
-                        );
-                    };
-                    scp_install_fallback(&socket_path, &platform)
+                    scp_install_fallback(&socket_path)
                         .await
                         .map_err(|e| format!("{e:#}"))
                 }
@@ -320,10 +312,35 @@ impl RemoteTransport for SshTransport {
 /// SCP install fallback: downloads the tarball locally, uploads it to
 /// the remote via SCP, then re-invokes the install script with the
 /// staging path baked in so the shared extraction tail runs.
-async fn scp_install_fallback(socket_path: &Path, platform: &RemotePlatform) -> anyhow::Result<()> {
+async fn scp_install_fallback(socket_path: &Path) -> anyhow::Result<()> {
     use std::process::Stdio;
 
-    let url = remote_server::setup::download_tarball_url(platform);
+    // Detect the remote platform so we can construct the correct download URL.
+    // This is a redundant uname call (the manager already ran detect_platform
+    // earlier), but it only happens on the rare SCP fallback path and avoids
+    // threading the platform through the trait.
+    let platform = match remote_server::ssh::run_ssh_command(
+        socket_path,
+        "uname -sm",
+        remote_server::setup::CHECK_TIMEOUT,
+    )
+    .await
+    {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            parse_uname_output(&stdout).map_err(|e| anyhow::anyhow!("{e:#}"))?
+        }
+        Ok(output) => {
+            let code = output.status.code().unwrap_or(-1);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("SCP fallback: uname -sm exited with code {code}: {stderr}");
+        }
+        Err(e) => {
+            anyhow::bail!("SCP fallback: platform detection failed: {e:#}");
+        }
+    };
+
+    let url = remote_server::setup::download_tarball_url(&platform);
     let staging_path = format!(
         "{}/oz-upload.tar.gz",
         remote_server::setup::remote_server_dir()

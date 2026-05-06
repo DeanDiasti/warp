@@ -415,10 +415,7 @@ pub fn install_script(staging_tarball_path: Option<&str>) -> String {
             "{no_http_client_exit_code}",
             &NO_HTTP_CLIENT_EXIT_CODE.to_string(),
         )
-        .replace(
-            "{staging_tarball_path}",
-            staging_tarball_path.unwrap_or(""),
-        )
+        .replace("{staging_tarball_path}", staging_tarball_path.unwrap_or(""))
 }
 
 /// Construct the download URL from the server root URL.

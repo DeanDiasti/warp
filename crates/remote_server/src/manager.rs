@@ -611,7 +611,6 @@ impl RemoteServerManager {
     ) where
         T: RemoteTransport + 'static,
     {
-        let platform = self.session_platforms.get(&session_id).cloned();
         #[cfg(target_family = "wasm")]
         {
             log::warn!("Remote server install_binary is a no-op on WASM");
@@ -633,7 +632,7 @@ impl RemoteServerManager {
             let spawner = self.spawner.clone();
             ctx.background_executor()
                 .spawn(async move {
-                    let result = transport.install_binary(platform).await;
+                    let result = transport.install_binary().await;
                     let _ = spawner
                         .spawn(move |_me, ctx| {
                             if let Err(error) = &result {
