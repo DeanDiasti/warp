@@ -21,8 +21,6 @@ use remote_server::setup::{
 use remote_server::ssh::ssh_args;
 use remote_server::transport::{Connection, RemoteTransport};
 
-use std::sync::Mutex;
-
 /// SSH transport: connects via a ControlMaster socket.
 ///
 /// `socket_path` is the local Unix socket created by the ControlMaster
@@ -33,9 +31,6 @@ use std::sync::Mutex;
 pub struct SshTransport {
     socket_path: PathBuf,
     auth_context: Arc<RemoteServerAuthContext>,
-    /// Detected remote platform, set after `detect_platform` succeeds.
-    /// Used by the SCP install fallback to construct the download URL.
-    platform: Arc<Mutex<Option<RemotePlatform>>>,
 }
 
 impl fmt::Debug for SshTransport {
@@ -51,7 +46,6 @@ impl SshTransport {
         Self {
             socket_path,
             auth_context,
-            platform: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -86,9 +80,8 @@ impl RemoteTransport for SshTransport {
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<RemotePlatform, String>> + Send>> {
         let socket_path = self.socket_path.clone();
-        let platform_slot = self.platform.clone();
         Box::pin(async move {
-            let result = match remote_server::ssh::run_ssh_command(
+            match remote_server::ssh::run_ssh_command(
                 &socket_path,
                 "uname -sm",
                 remote_server::setup::CHECK_TIMEOUT,
@@ -105,12 +98,7 @@ impl RemoteTransport for SshTransport {
                     Err(format!("uname -sm exited with code {code}: {stderr}"))
                 }
                 Err(e) => Err(format!("{e:#}")),
-            };
-            // Stash the detected platform for the SCP fallback.
-            if let Ok(ref p) = result {
-                *platform_slot.lock().unwrap() = Some(p.clone());
             }
-            result
         })
     }
 
@@ -203,11 +191,13 @@ impl RemoteTransport for SshTransport {
         })
     }
 
-    fn install_binary(&self) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> {
+    fn install_binary(
+        &self,
+        platform: Option<RemotePlatform>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> {
         let socket_path = self.socket_path.clone();
-        let platform_slot = self.platform.clone();
         Box::pin(async move {
-            let script = remote_server::setup::install_script();
+            let script = remote_server::setup::install_script(None);
             log::info!(
                 "Installing remote server binary to {}",
                 remote_server::setup::remote_server_binary()
@@ -224,14 +214,13 @@ impl RemoteTransport for SshTransport {
                     if output.status.code()
                         == Some(remote_server::setup::NO_HTTP_CLIENT_EXIT_CODE) =>
                 {
-                    log::info!("Remote has no curl/wget, falling back to SCP upload");
-                    let platform = platform_slot.lock().unwrap().clone();
+                    log::info!("Remote server has no curl/wget, falling back to SCP upload");
                     let Some(platform) = platform else {
                         return Err(
                             "SCP fallback requires platform detection to have succeeded".into()
                         );
                     };
-                    scp_install_fallback(&socket_path, &platform, &script)
+                    scp_install_fallback(&socket_path, &platform)
                         .await
                         .map_err(|e| format!("{e:#}"))
                 }
@@ -330,16 +319,15 @@ impl RemoteTransport for SshTransport {
 
 /// SCP install fallback: downloads the tarball locally, uploads it to
 /// the remote via SCP, then re-invokes the install script with the
-/// staging path as $1 so the shared extraction tail runs.
-async fn scp_install_fallback(
-    socket_path: &Path,
-    platform: &RemotePlatform,
-    install_script: &str,
-) -> anyhow::Result<()> {
+/// staging path baked in so the shared extraction tail runs.
+async fn scp_install_fallback(socket_path: &Path, platform: &RemotePlatform) -> anyhow::Result<()> {
     use std::process::Stdio;
 
     let url = remote_server::setup::download_tarball_url(platform);
-    let staging_path = remote_server::setup::remote_tarball_staging_path();
+    let staging_path = format!(
+        "{}/oz-upload.tar.gz",
+        remote_server::setup::remote_server_dir()
+    );
     let timeout = remote_server::setup::SCP_INSTALL_TIMEOUT;
 
     // 1. Download the tarball locally into a temp directory.
@@ -350,6 +338,8 @@ async fn scp_install_fallback(
     log::info!("Downloading tarball locally from {url}");
     let output = command::r#async::Command::new("curl")
         .arg("-fSL")
+        .arg("--connect-timeout")
+        .arg("15")
         .arg(&url)
         .arg("-o")
         .arg(&local_tarball)
@@ -371,18 +361,14 @@ async fn scp_install_fallback(
     log::info!("Uploading tarball to remote at {staging_path}");
     remote_server::ssh::scp_upload(socket_path, &local_tarball, &staging_path, timeout).await?;
 
-    // 3. Re-invoke the install script with the staging path as $1.
-    //    The script's `[ -n "$1" ]` branch will mv the tarball and
-    //    run the shared extraction tail.
-    let staging_path_expanded = staging_path.replace("~", "$HOME");
-    log::info!("Running extraction via install script with tarball at {staging_path_expanded}");
-    let output = remote_server::ssh::run_ssh_script_with_args(
-        socket_path,
-        install_script,
-        &[&staging_path_expanded],
-        timeout,
-    )
-    .await?;
+    // 3. Run the install script with the staging path baked in.
+    //    The script's `staging_tarball_path` variable is non-empty, so it
+    //    skips the download and extracts from the uploaded tarball.
+    log::info!("Running extraction via install script with tarball at {staging_path}");
+
+    let script = remote_server::setup::install_script(Some(&staging_path));
+
+    let output = remote_server::ssh::run_ssh_script(socket_path, &script, timeout).await?;
     if output.status.success() {
         Ok(())
     } else {

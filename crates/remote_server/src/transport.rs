@@ -124,6 +124,7 @@ pub trait RemoteTransport: Send + Sync + std::fmt::Debug {
     /// `Err(_)` if the install failed (e.g. SSH timeout, script error).
     fn install_binary(
         &self,
+        platform: Option<RemotePlatform>,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>;
 
     /// Establish a new connection to the remote server.

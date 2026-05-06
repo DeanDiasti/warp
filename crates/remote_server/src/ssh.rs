@@ -154,7 +154,7 @@ pub async fn run_ssh_script(socket_path: &Path, script: &str, timeout: Duration)
         .map_err(|e| anyhow!("Script failed: {e}"))
 }
 
-/// Upload
+/// Upload a local file to the remote host via `scp`, reusing the
 /// ControlMaster socket for authentication. Returns `Ok(())` on success
 /// or an error describing the failure.
 pub async fn scp_upload(
