@@ -396,7 +396,7 @@ const INSTALL_SCRIPT_TEMPLATE: &str = include_str!("install_remote_server.sh");
 /// the unversioned path used by `script/deploy_remote_server`); pinned to
 /// `&version={v}` / `-{v}` on every other channel, where `v` falls back
 /// to `CARGO_PKG_VERSION` when no release tag is baked in.
-pub fn install_script() -> String {
+pub fn install_script(staging_tarball_path: Option<&str>) -> String {
     let (vq, version_suffix) = match ChannelState::channel() {
         Channel::Local | Channel::Oss => (String::new(), String::new()),
         Channel::Stable | Channel::Preview | Channel::Dev | Channel::Integration => {
@@ -414,6 +414,10 @@ pub fn install_script() -> String {
         .replace(
             "{no_http_client_exit_code}",
             &NO_HTTP_CLIENT_EXIT_CODE.to_string(),
+        )
+        .replace(
+            "{staging_tarball_path}",
+            staging_tarball_path.unwrap_or(""),
         )
 }
 
@@ -467,12 +471,6 @@ pub fn download_tarball_url(platform: &RemotePlatform) -> String {
         download_channel(),
         version_query(),
     )
-}
-
-/// Returns the remote path where the tarball should be uploaded before
-/// the extraction script runs (SCP fallback).
-pub fn remote_tarball_staging_path() -> String {
-    format!("{}/oz-upload.tar.gz", remote_server_dir())
 }
 
 /// Exit code the install script uses when neither curl nor wget is

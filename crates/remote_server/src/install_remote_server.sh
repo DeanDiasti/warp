@@ -9,10 +9,7 @@
 #   {version_query}             — e.g. &version=v0.2026... (empty when no release tag)
 #   {version_suffix}            — e.g. -v0.2026...        (empty when no release tag)
 #   {no_http_client_exit_code}  — exit code when neither curl nor wget is available
-#
-# When invoked with a positional argument ($1), the script skips the
-# download phase and extracts from the provided tarball path instead.
-# This is used by the SCP upload fallback on the client side.
+#   {staging_tarball_path}      — path to a pre-uploaded tarball (SCP fallback; empty normally)
 set -e
 
 arch=$(uname -m)
@@ -45,9 +42,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [ -n "$1" ]; then
+staging_tarball_path="{staging_tarball_path}"
+if [ -n "$staging_tarball_path" ]; then
   # SCP fallback: tarball already uploaded by the client.
-  mv "$1" "$tmpdir/oz.tar.gz"
+  staging_tarball_path="${staging_tarball_path/#\~/"$HOME"}"
+  mv "$staging_tarball_path" "$tmpdir/oz.tar.gz"
 else
   # Normal path: download via curl or wget.
   url="{download_base_url}?package=tar&os=$os_name&arch=$arch_name&channel={channel}{version_query}"
