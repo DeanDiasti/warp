@@ -75,30 +75,34 @@ impl SshTransport {
     }
 }
 
+/// Runs `uname -sm` on the remote host via the ControlMaster socket and
+/// parses the output into a [`RemotePlatform`].
+async fn detect_remote_platform(socket_path: &Path) -> anyhow::Result<RemotePlatform> {
+    let output = remote_server::ssh::run_ssh_command(
+        socket_path,
+        "uname -sm",
+        remote_server::setup::CHECK_TIMEOUT,
+    )
+    .await?;
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(parse_uname_output(&stdout)?)
+    } else {
+        let code = output.status.code().unwrap_or(-1);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("uname -sm exited with code {code}: {stderr}")
+    }
+}
+
 impl RemoteTransport for SshTransport {
     fn detect_platform(
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<RemotePlatform, String>> + Send>> {
         let socket_path = self.socket_path.clone();
         Box::pin(async move {
-            match remote_server::ssh::run_ssh_command(
-                &socket_path,
-                "uname -sm",
-                remote_server::setup::CHECK_TIMEOUT,
-            )
-            .await
-            {
-                Ok(output) if output.status.success() => {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    parse_uname_output(&stdout).map_err(|e| format!("{e:#}"))
-                }
-                Ok(output) => {
-                    let code = output.status.code().unwrap_or(-1);
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    Err(format!("uname -sm exited with code {code}: {stderr}"))
-                }
-                Err(e) => Err(format!("{e:#}")),
-            }
+            detect_remote_platform(&socket_path)
+                .await
+                .map_err(|e| format!("{e:#}"))
         })
     }
 
@@ -319,26 +323,9 @@ async fn scp_install_fallback(socket_path: &Path) -> anyhow::Result<()> {
     // This is a redundant uname call (the manager already ran detect_platform
     // earlier), but it only happens on the rare SCP fallback path and avoids
     // threading the platform through the trait.
-    let platform = match remote_server::ssh::run_ssh_command(
-        socket_path,
-        "uname -sm",
-        remote_server::setup::CHECK_TIMEOUT,
-    )
-    .await
-    {
-        Ok(output) if output.status.success() => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            parse_uname_output(&stdout).map_err(|e| anyhow::anyhow!("{e:#}"))?
-        }
-        Ok(output) => {
-            let code = output.status.code().unwrap_or(-1);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("SCP fallback: uname -sm exited with code {code}: {stderr}");
-        }
-        Err(e) => {
-            anyhow::bail!("SCP fallback: platform detection failed: {e:#}");
-        }
-    };
+    let platform = detect_remote_platform(socket_path)
+        .await
+        .map_err(|e| anyhow::anyhow!("SCP fallback: {e:#}"))?;
 
     let url = remote_server::setup::download_tarball_url(&platform);
     let staging_path = format!(
